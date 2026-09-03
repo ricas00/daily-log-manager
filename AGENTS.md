@@ -5,8 +5,11 @@ Mobile-first web UI for logging daily events, with event suggestions from collec
 ## Structure
 - `app/` — the web app (served locally, no build step)
   - `index.html` — single-page UI (mobile-first)
-  - `server.py` — stdlib-only Python server; serves the UI and persists entries
-- `data/` — persisted JSON entries (one file per day: `YYYY-MM-DD.json`)
+  - `server.py` — stdlib-only Python server; serves the UI, entries, tags, suggestions
+  - `collect.py` — collects a day from all 5 sources (stdlib + `gh` CLI only); run by the
+    server's refresh worker, or standalone: `python3 app/collect.py --day YYYY-MM-DD`
+- `data/` — persisted JSON entries (one file per day: `YYYY-MM-DD.json`), plus `.token`
+  (passcode) and `tags.json` (user tag list) — all gitignored
 - `prompts/` — build prompts handed to other LLMs (e.g. the Productivity agent API)
 
 ## Conventions
@@ -15,8 +18,23 @@ Mobile-first web UI for logging daily events, with event suggestions from collec
 - Data model (per entry): `{id, time (ISO local), title, category, notes, source}`.
   - `source` = `manual` (typed in the UI) or `suggested` (added from a collected source).
 - Server: dedicated port **8787**, bound on the Hermes VM for LAN reachability
-  (`http://192.168.13.60:8787`); the user reverse-proxies it to a domain. If it is ever exposed
-  beyond the LAN, add auth (simple shared token) first.
+  (`http://192.168.13.60:8787`); the user reverse-proxies it to a domain (NPM upstream).
+  Plain-HTTP upstream behind TLS termination is fine; no websockets.
+- Auth (built-in since 2026-09-03): every request needs `Authorization: Bearer <token>`.
+  Token auto-generated on first start at `data/.token` (or override with `DAILY_LOG_TOKEN`
+  env var). The UI shows a passcode gate on load and stores the token only in browser
+  localStorage. This is a second layer UNDER any proxy-level basic auth.
+- Tags are user-editable in the UI (Tags button): stored in `data/tags.json`, served by
+  `GET/POST /api/tags` (same bearer auth), default `general, work, dev, meeting, health,
+  personal`. Entries keep whatever label they were saved with.
+- "↻ Analysis" button (`POST /api/refresh?day=...`) runs `collect.py` in a background thread
+  and stores the result as pending suggestions for that day (`GET /api/suggestions?day=...`
+  → `{status: idle|running|done, data}`). UI renders suggestions above the log with
+  "add to log" / "dismiss"; approving writes a `source: "suggested"` entry. Manual entries
+  are never touched by a refresh. Collect reads credentials from the profile .env and
+  `state.db` on this VM — it only works on the Hermes host.
+- Persistent: systemd user service `daily-log-manager.service` (`deploy/`), enabled +
+  lingering (survives logout/reboot), `Restart=on-failure`.
 - Notion sync is handled by the Personal Manager agent, not by this app. The app owns local capture only.
 
 ## Run

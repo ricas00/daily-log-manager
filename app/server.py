@@ -16,7 +16,9 @@ import json
 import os
 import re
 import secrets
+import sys
 import threading
+import time
 from datetime import date, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,6 +33,13 @@ MAX_BODY = 256 * 1024
 _lock = threading.Lock()
 _day_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _CATEGORY_RE = re.compile(r"^[\w -]{1,40}$")
+
+DEFAULT_TAGS = ["general", "work", "dev", "meeting", "health", "personal"]
+TAGS_FILE = DATA_DIR / "tags.json"
+SUGG_DIR = DATA_DIR / ".suggestions"
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import collect as collector  # noqa: E402
 
 
 def _resolve_token() -> str:
@@ -50,6 +59,58 @@ def _resolve_token() -> str:
 
 
 TOKEN = _resolve_token()
+
+
+# --- tags ------------------------------------------------------------------
+def _load_tags() -> list:
+    if TAGS_FILE.exists():
+        try:
+            t = json.loads(TAGS_FILE.read_text(encoding="utf-8")).get("tags", [])
+            if isinstance(t, list) and t:
+                return [str(x) for x in t]
+        except (json.JSONDecodeError, OSError):
+            pass
+    return list(DEFAULT_TAGS)
+
+
+def _save_tags(tags: list) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = TAGS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"tags": tags}, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(TAGS_FILE)
+
+
+# --- suggestions (refresh) ---------------------------------------------------
+_refresh_lock = threading.Lock()
+_refresh_state: dict = {}  # day -> {"status": str, "started": float}
+
+
+def _sugg_file(day: str) -> Path:
+    return SUGG_DIR / f"{day}.json"
+
+
+def _load_sugg(day: str) -> dict:
+    f = _sugg_file(day)
+    if f.exists():
+        try:
+            return json.loads(f.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def _run_refresh(day: str) -> None:
+    try:
+        result = collector.run(day)
+        SUGG_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _sugg_file(day).with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(_sugg_file(day))
+        with _refresh_lock:
+            _refresh_state[day] = {"status": "done", "started": time.time()}
+    except Exception as e:  # noqa: BLE001
+        with _refresh_lock:
+            _refresh_state[day] = {"status": f"error: {e}", "started": time.time()}
 
 
 def _load_day(day: str) -> list:
@@ -167,16 +228,64 @@ class Handler(BaseHTTPRequestHandler):
                 entries = _load_day(day)
             entries.sort(key=lambda e: e.get("time", ""))
             self._send_json(200, {"day": day, "entries": entries})
+        elif path == "/api/tags":
+            if not self._authorized():
+                self._send_json(401, {"error": "unauthorized"})
+                return
+            self._send_json(200, {"tags": _load_tags()})
+        elif path == "/api/suggestions":
+            if not self._authorized():
+                self._send_json(401, {"error": "unauthorized"})
+                return
+            q = self._qs()
+            day = q.get("day", date.today().isoformat())
+            if not _day_re.match(day):
+                self._send_json(400, {"error": "day must be YYYY-MM-DD"})
+                return
+            with _refresh_lock:
+                st = _refresh_state.get(day, {"status": "idle", "started": 0})
+            self._send_json(200, {"day": day, "status": st["status"], "data": _load_sugg(day)})
         else:
             self._send_json(404, {"error": "not found"})
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
-        if path != "/api/entries":
+        if path not in ("/api/entries", "/api/tags", "/api/refresh"):
             self._send_json(404, {"error": "not found"})
             return
         if not self._authorized():
             self._send_json(401, {"error": "unauthorized"})
+            return
+        if path == "/api/tags":
+            raw, err = self._read_json_body()
+            if err:
+                self._send_json(400, {"error": err})
+                return
+            tags = [str(t).strip().lower() for t in (raw or {}).get("tags", [])
+                    if isinstance(t, str) and t.strip()]
+            if not tags or len(tags) > 30:
+                self._send_json(400, {"error": "need 1-30 tags"})
+                return
+            if any(not _CATEGORY_RE.match(t) for t in tags) or len(set(tags)) != len(tags):
+                self._send_json(400, {"error": "invalid or duplicate tag"})
+                return
+            _save_tags(tags)
+            self._send_json(200, {"ok": True, "tags": tags})
+            return
+        if path == "/api/refresh":
+            q = self._qs()
+            day = q.get("day", date.today().isoformat())
+            if not _day_re.match(day):
+                self._send_json(400, {"error": "day must be YYYY-MM-DD"})
+                return
+            with _refresh_lock:
+                st = _refresh_state.get(day)
+                if st and st["status"] == "running" and time.time() - st["started"] < 300:
+                    self._send_json(409, {"error": "refresh already running"})
+                    return
+                _refresh_state[day] = {"status": "running", "started": time.time()}
+            threading.Thread(target=_run_refresh, args=(day,), daemon=True).start()
+            self._send_json(202, {"ok": True, "status": "running"})
             return
         raw, err = self._read_json_body()
         if err:

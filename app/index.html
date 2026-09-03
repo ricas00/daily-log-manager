@@ -80,6 +80,35 @@
   .gate-card p { margin: 0; color: var(--muted); font-size: 14px; }
   .gate-card form { display: grid; gap: 10px; }
   .gate-card button { background: var(--accent); color: #08111c; border: 0; border-radius: 10px; padding: 12px; font: inherit; font-weight: 600; }
+  .muted { color: var(--muted); font-size: 13px; }
+  section#suggSection {
+    background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 12px; margin-bottom: 18px; display: grid; gap: 8px;
+  }
+  .sugg-head { display: flex; align-items: baseline; gap: 8px; font-weight: 600; }
+  ul#suggList { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+  li.sugg { background: var(--card2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+  .sugg .top { display: flex; align-items: baseline; gap: 8px; }
+  .sugg .time { color: var(--accent); font-size: 13px; font-variant-numeric: tabular-nums; flex: none; }
+  .sugg .title { font-weight: 600; flex: 1; word-break: break-word; }
+  .sugg .src { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 7px; flex: none; }
+  .sugg .notes { color: var(--muted); font-size: 13px; margin-top: 4px; word-break: break-word; }
+  .sugg .acts { display: flex; gap: 8px; margin-top: 8px; }
+  .sugg .acts button { flex: 1; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--fg); font: inherit; font-size: 14px; padding: 8px; }
+  .sugg .acts .ok { background: var(--ok); border-color: var(--ok); color: #06130c; font-weight: 600; }
+  .sugg .acts button:active { filter: brightness(.85); }
+  .modal { position: fixed; inset: 0; background: rgba(5,8,11,.7); display: flex; align-items: flex-end; justify-content: center; z-index: 9; }
+  .modal[hidden] { display: none; }
+  .modal-card { background: var(--card); border: 1px solid var(--border); border-radius: 18px 18px 0 0; padding: 20px 16px calc(20px + env(safe-area-inset-bottom)); width: 100%; max-width: 560px; display: grid; gap: 12px; }
+  .modal-card h2 { margin: 0; font-size: 18px; }
+  .modal-card p { margin: 0; }
+  .modal-card .row { align-items: center; }
+  .modal-card button.primary { background: var(--accent); color: #08111c; border: 0; border-radius: 10px; padding: 12px; font: inherit; font-weight: 600; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; background: var(--card2); border: 1px solid var(--border); border-radius: 999px; padding: 6px 8px 6px 12px; font-size: 14px; }
+  .chip button { background: none; border: 0; color: var(--muted); font-size: 15px; line-height: 1; padding: 2px 4px; }
+  .chip button:active { color: var(--danger); }
+  .bar button.busy { opacity: .5; }
 </style>
 </head>
 <body>
@@ -91,15 +120,37 @@
   <div class="bar">
     <input type="date" id="day" aria-label="Day">
     <button type="button" id="todayBtn">Today</button>
+    <button type="button" id="refreshBtn" title="Re-check all sources for this day">↻ Analysis</button>
+    <button type="button" id="tagsBtn" title="Edit available tags">Tags</button>
+  </div>
+
+  <section id="suggSection" hidden>
+    <div class="sugg-head">
+      <span>Suggestions</span>
+      <span id="suggMeta" class="muted"></span>
+    </div>
+    <ul id="suggList"></ul>
+    <div id="suggStatus" class="muted" hidden></div>
+  </section>
+
+  <div id="tagsModal" class="modal" hidden>
+    <div class="modal-card">
+      <h2>Tags</h2>
+      <p class="muted">Edit the tags you can use. Entries already logged keep their old label.</p>
+      <div id="tagChips"></div>
+      <div class="row">
+        <input type="text" id="newTag" maxlength="40" placeholder="New tag (e.g. fitness)">
+        <button type="button" id="addTagBtn">Add</button>
+      </div>
+      <div class="err" id="tagsErr"></div>
+      <button type="button" id="closeTagsBtn" class="primary">Done</button>
+    </div>
   </div>
 
   <form id="add" autocomplete="off">
     <div class="row">
       <input type="time" id="time" aria-label="Time" required>
-      <select id="category" aria-label="Category">
-        <option>general</option><option>work</option><option>dev</option>
-        <option>meeting</option><option>health</option><option>personal</option>
-      </select>
+      <select id="category" aria-label="Category"></select>
     </div>
     <input type="text" id="title" maxlength="300" placeholder="What happened?" required>
     <textarea id="notes" maxlength="2000" rows="2" placeholder="Notes (optional)"></textarea>
@@ -173,6 +224,31 @@ const now = new Date();
 $("time").value = `${String(now.getHours()).padStart(2,"0")}:${String(now.getMinutes()).padStart(2,"0")}`;
 
 let entries = [];
+let tags = [];
+
+function timeTxt(iso) {
+  const t = new Date(iso);
+  return isNaN(t) ? (iso || "").slice(0, 16) : t.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+}
+
+function fillCategorySelect() {
+  const sel = $("category");
+  const cur = sel.value;
+  sel.innerHTML = "";
+  const list = tags.length ? tags : ["general"];
+  for (const t of list) {
+    const o = document.createElement("option");
+    o.value = t; o.textContent = t;
+    sel.appendChild(o);
+  }
+  if (cur && tags.includes(cur)) sel.value = cur;
+}
+
+async function loadTags() {
+  const res = await fetch("/api/tags", { headers: authHeaders() });
+  if (res.status === 401) { showGate(); return; }
+  if (res.ok) { tags = (await res.json()).tags || []; fillCategorySelect(); }
+}
 
 async function load() {
   const res = await fetch(`/api/entries?day=${encodeURIComponent($("day").value)}`, {
@@ -182,7 +258,107 @@ async function load() {
   const data = await res.json();
   entries = data.entries || [];
   render();
+  loadSuggestions();
 }
+
+// --- suggestions -----------------------------------------------------------
+let pollTimer = null;
+let suggData = null;
+
+function renderSuggestions() {
+  const section = $("suggSection");
+  const list = $("suggList");
+  const meta = $("suggMeta");
+  const status = $("suggStatus");
+  list.innerHTML = "";
+  status.hidden = true;
+  if (!suggData || !suggData.suggestions || !suggData.suggestions.length) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  const when = suggData.generated_at ? new Date(suggData.generated_at) : null;
+  meta.textContent = when ? `checked ${when.toLocaleString([], {day:"numeric", month:"short", hour:"2-digit", minute:"2-digit"})}` : "";
+  const existing = new Set(entries.map(e => e.title.toLowerCase()));
+  for (const s of suggData.suggestions) {
+    if (existing.has(s.title.toLowerCase())) continue; // already logged
+    const li = document.createElement("li");
+    li.className = "sugg";
+    const top = document.createElement("div"); top.className = "top";
+    const tm = document.createElement("span"); tm.className = "time"; tm.textContent = (s.time || "").slice(0, 5);
+    const tt = document.createElement("span"); tt.className = "title"; tt.textContent = s.title;
+    const src = document.createElement("span"); src.className = "src"; src.textContent = s.source;
+    top.append(tm, tt, src);
+    li.appendChild(top);
+    if (s.notes) {
+      const n = document.createElement("div"); n.className = "notes"; n.textContent = s.notes;
+      li.appendChild(n);
+    }
+    const acts = document.createElement("div"); acts.className = "acts";
+    const ok = document.createElement("button"); ok.type = "button"; ok.className = "ok"; ok.textContent = "add to log";
+    const no = document.createElement("button"); no.type = "button"; no.textContent = "dismiss";
+    const base = { time: new Date(`${suggData.day}T${(s.time || "09:00").slice(0, 5)}`).toISOString(),
+                   title: s.title, category: s.category || "general", notes: s.notes || "", source: "suggested" };
+    ok.onclick = async () => {
+      const r = await fetch("/api/entries", { method: "POST",
+        headers: {"Content-Type": "application/json", ...authHeaders()}, body: JSON.stringify(base) });
+      if (r.ok) { suggData.suggestions = suggData.suggestions.filter(x => x !== s); renderSuggestions(); load(); }
+    };
+    no.onclick = () => { suggData.suggestions = suggData.suggestions.filter(x => x !== s); renderSuggestions(); };
+    acts.append(ok, no);
+    li.appendChild(acts);
+    list.appendChild(li);
+  }
+  const errs = suggData.errors ? Object.entries(suggData.errors).map(([k, v]) => `${k}: ${v}`) : [];
+  if (errs.length) { status.hidden = false; status.textContent = "source errors — " + errs.join(" · "); }
+}
+
+async function loadSuggestions() {
+  const day = $("day").value || today();
+  const res = await fetch(`/api/suggestions?day=${encodeURIComponent(day)}`, { headers: authHeaders() });
+  if (res.status === 401) { showGate(); return; }
+  const data = await res.json();
+  if (data.status === "running") {
+    suggData = null;
+    $("suggSection").hidden = false;
+    $("suggMeta").textContent = "checking all sources…";
+    $("suggStatus").hidden = true;
+    if (!pollTimer) pollTimer = setInterval(async () => {
+      const r2 = await fetch(`/api/suggestions?day=${encodeURIComponent(day)}`, { headers: authHeaders() });
+      if (!r2.ok) return;
+      const d2 = await r2.json();
+      if (d2.status !== "running") {
+        clearInterval(pollTimer); pollTimer = null;
+        suggData = d2.data || null;
+        renderSuggestions();
+      }
+    }, 3000);
+    return;
+  }
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  suggData = data.data || null;
+  renderSuggestions();
+}
+
+$("refreshBtn").addEventListener("click", async () => {
+  const day = $("day").value || today();
+  const btn = $("refreshBtn");
+  btn.classList.add("busy"); btn.textContent = "…";
+  const res = await fetch(`/api/refresh?day=${encodeURIComponent(day)}`, {
+    method: "POST", headers: authHeaders(),
+  });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok && !d.status) {
+    btn.classList.remove("busy"); btn.textContent = "↻ Analysis";
+    $("suggSection").hidden = false;
+    $("suggStatus").hidden = false;
+    $("suggStatus").textContent = d.error || "refresh failed";
+    $("suggMeta").textContent = "";
+    return;
+  }
+  loadSuggestions();
+  btn.classList.remove("busy"); btn.textContent = "↻ Analysis";
+});
 
 function render() {
   const list = $("list");
@@ -192,11 +368,8 @@ function render() {
     const li = document.createElement("li");
     li.className = "entry";
 
-    const t = new Date(e.time);
-    const timeTxt = isNaN(t) ? e.time.slice(0, 16) : t.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
-
     const top = document.createElement("div"); top.className = "top";
-    const time = document.createElement("span"); time.className = "time"; time.textContent = timeTxt;
+    const time = document.createElement("span"); time.className = "time"; time.textContent = timeTxt(e.time);
     const title = document.createElement("span"); title.className = "title"; title.textContent = e.title;
     const cat = document.createElement("span"); cat.className = "cat"; cat.textContent = e.category;
     top.append(time, title, cat);
@@ -220,6 +393,56 @@ function render() {
     list.appendChild(li);
   }
 }
+
+// --- tags modal --------------------------------------------------------------
+function renderTagChips() {
+  const wrap = $("tagChips");
+  wrap.innerHTML = "";
+  wrap.className = "chips";
+  for (const t of tags) {
+    const chip = document.createElement("span"); chip.className = "chip";
+    const label = document.createElement("span"); label.textContent = t;
+    const rm = document.createElement("button"); rm.type = "button"; rm.textContent = "×";
+    rm.title = `remove ${t}`;
+    rm.onclick = async () => {
+      if (tags.length <= 1) { $("tagsErr").textContent = "Keep at least one tag."; return; }
+      const next = tags.filter(x => x !== t);
+      const res = await fetch("/api/tags", { method: "POST",
+        headers: {"Content-Type": "application/json", ...authHeaders()}, body: JSON.stringify({tags: next}) });
+      if (!res.ok) { $("tagsErr").textContent = (await res.json().catch(() => ({}))).error || "failed"; return; }
+      $("tagsErr").textContent = "";
+      tags = next; renderTagChips(); fillCategorySelect();
+    };
+    chip.append(label, rm);
+    wrap.appendChild(chip);
+  }
+}
+
+async function openTags() {
+  $("tagsModal").hidden = false;
+  $("tagsErr").textContent = "";
+  await loadTags();
+  renderTagChips();
+  $("newTag").focus();
+}
+
+function closeTags() { $("tagsModal").hidden = true; }
+
+$("tagsBtn").addEventListener("click", openTags);
+$("closeTagsBtn").addEventListener("click", closeTags);
+$("addTagBtn").addEventListener("click", async () => {
+  const v = $("newTag").value.trim().toLowerCase().replace(/\s+/g, "-");
+  if (!v) return;
+  if (tags.includes(v)) { $("tagsErr").textContent = `"${v}" already exists.`; return; }
+  const res = await fetch("/api/tags", { method: "POST",
+    headers: {"Content-Type": "application/json", ...authHeaders()}, body: JSON.stringify({tags: [...tags, v]}) });
+  const d = await res.json().catch(() => ({}));
+  if (!res.ok) { $("tagsErr").textContent = d.error || "failed"; return; }
+  $("newTag").value = "";
+  $("tagsErr").textContent = "";
+  tags = d.tags; renderTagChips(); fillCategorySelect();
+});
+$("newTag").addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); $("addTagBtn").click(); } });
 
 $("add").addEventListener("submit", async (ev) => {
   ev.preventDefault();
@@ -248,6 +471,7 @@ $("add").addEventListener("submit", async (ev) => {
 
 $("day").addEventListener("change", load);
 $("todayBtn").addEventListener("click", () => { $("day").value = today(); load(); });
+loadTags();
 load();
 </script>
 </body>
