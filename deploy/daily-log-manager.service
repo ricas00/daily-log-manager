@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily Log Manager web UI (mobile-first, LAN on :8787)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/hermes/personal-manager/daily-log-manager/app/server.py
+WorkingDirectory=/home/hermes/personal-manager/daily-log-manager
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,6 @@
+# Local/generated data: passcode + daily entries — never commit.
+data/
+__pycache__/
+*.pyc
+*.swp
+.env
